@@ -1,0 +1,83 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MYLSTM_SF(nn.Module):
+    def __init__(self, units, return_sequences=True):
+        super(MYLSTM_SF, self).__init__()
+        self.units = units
+        self.return_sequences = return_sequences
+        
+        # Define weights for the input transformations
+        self.kernel = nn.Parameter(torch.Tensor(4, units, units))
+        
+        # Define weights for the state transformations
+        self.recurrent_a = nn.Parameter(torch.Tensor(4, 4 * units, units))
+        
+        # Define biases for the gates
+        self.bias = nn.Parameter(torch.Tensor(4, units))
+        
+        # Weights for self-attention
+        self.W_q = nn.Parameter(torch.Tensor(units, units))
+        self.W_k = nn.Parameter(torch.Tensor(units, units))
+        self.W_v = nn.Parameter(torch.Tensor(units, units))
+        
+        # Initialize weights
+        self.reset_parameters()
+        
+    def reset_parameters(self):
+        # Initialize (or reset) all parameters
+        for weight in self.parameters():
+            if weight.data.ndimension() >= 2:
+                nn.init.xavier_uniform_(weight.data)
+            else:
+                nn.init.zeros_(weight.data)
+
+    def forward(self, inputs):
+        batch_size, seq_len, _ = inputs.size()
+        hidden_seq = []
+        
+        # Initialize hidden and cell state
+        h_t = torch.zeros(batch_size, self.units).to(inputs.device)
+        c_t = torch.zeros(batch_size, self.units).to(inputs.device)
+        h_t2, h_t3, h_t4 = h_t.clone(), h_t.clone(), h_t.clone()
+        
+        for t in range(seq_len):
+            x_t = inputs[:, t, :]
+            
+            # Self-attention mechanism
+            h_stack = torch.stack((h_t, h_t2, h_t3, h_t4), dim=1)
+            q_k_v = h_stack @ torch.stack((self.W_q, self.W_k, self.W_v), dim=0)
+            q, k, v = q_k_v.unbind(0)  # split into Q, K, V
+            m_h = torch.matmul(q, k.transpose(-2, -1))
+            m_h /= torch.sqrt(torch.tensor(self.units, dtype=torch.float32))
+            m_h = F.softmax(m_h, dim=-1)
+            e = torch.matmul(m_h, v)
+            a_0 = e.view(-1, 4 * self.units)
+
+            # LSTM calculations
+            gates = x_t @ self.kernel + a_0 @ self.recurrent_a + self.bias
+            f_gate, i_gate, o_gate, c_hat = gates.chunk(4, 1)
+            f_gate, i_gate, o_gate = torch.sigmoid(f_gate), torch.sigmoid(i_gate), torch.sigmoid(o_gate)
+            c_hat = torch.tanh(c_hat)
+            
+            c_t = f_gate * c_t + i_gate * c_hat
+            h_t = o_gate * torch.tanh(c_t)
+            
+            # Roll the states (ensure that we're creating new tensors, not just reassigning references)
+            h_t4 = h_t3.clone()
+            h_t3 = h_t2.clone()
+            h_t2 = h_t.clone()
+            
+            if self.return_sequences:
+                hidden_seq.append(h_t.unsqueeze(1))
+
+        # Stack the hidden sequence into a tensor
+        if self.return_sequences:
+            hidden_seq = torch.cat(hidden_seq, dim=1)
+            return hidden_seq
+        else:
+            return h_t
+
+    def extra_repr(self):
+        return 'units={}, return_sequences={}'.format(self.units, self.return_sequences)
